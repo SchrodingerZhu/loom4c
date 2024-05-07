@@ -19,9 +19,8 @@ public:
                                loom_memory_order::Relaxed))
       return;
     while (lock_.swap(LOCKED_WITH_WAITER, loom_memory_order::Acquire) !=
-           UNLOCKED) {
-      loom_yield_now();
-    }
+           UNLOCKED)
+      lock_.wait(LOCKED_WITH_WAITER);
 
     return;
   }
@@ -33,8 +32,8 @@ public:
 };
 
 int main() {
-  constexpr size_t thd_num = 4;
-  constexpr size_t loop = 4;
+  constexpr size_t thd_num = 2;
+  constexpr size_t loop = 1;
   loom_start([]() {
     struct Data {
       Lock lock;

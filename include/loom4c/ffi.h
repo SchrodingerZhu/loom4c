@@ -1,4 +1,5 @@
 #ifndef LOOM4C_FFI_H
+#define LOOM4C_FFI_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -73,5 +74,4 @@ size_t loom_atomic_notify_all(atm_t, enum loom_size_type);
 }
 #endif
 
-#define LOOM4C_FFI_H
 #endif // LOOM4C_FFI_H

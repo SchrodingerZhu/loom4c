@@ -33,7 +33,7 @@ public:
 
 int main() {
   constexpr size_t thd_num = 2;
-  constexpr size_t loop = 1;
+  constexpr size_t loop = 2;
   loom_start([]() {
     struct Data {
       Lock lock;

@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-dashmap = "5.5.3"
-lazy_static = "1.4.0"
 loom = "0.7.2"
 
 
@@ -15,3 +13,4 @@ crate-type = ["cdylib"]
 
 [profile.release]
 lto = true
+debug = true

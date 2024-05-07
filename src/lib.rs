@@ -1,10 +1,9 @@
 use core::ffi::c_void;
-use dashmap::DashMap;
 use loom::{
-    lazy_static::Lazy,
-    sync::{atomic::*, Arc, Mutex, Notify},
+    sync::{atomic::Ordering, Mutex},
+    thread::Thread,
 };
-use std::{collections::HashMap, ffi::c_uint};
+use std::ops::Deref;
 
 #[repr(C)]
 pub enum SizeType {
@@ -22,6 +21,63 @@ pub enum MemoryOrder {
     AcqRel = 3,
     SeqCst = 4,
 }
+
+struct Atomic<T> {
+    inner: T,
+    queue: Mutex<Vec<Thread>>,
+}
+
+impl<T> Deref for Atomic<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+type AtomicU8 = Atomic<loom::sync::atomic::AtomicU8>;
+type AtomicU16 = Atomic<loom::sync::atomic::AtomicU16>;
+type AtomicU32 = Atomic<loom::sync::atomic::AtomicU32>;
+type AtomicU64 = Atomic<loom::sync::atomic::AtomicU64>;
+
+macro_rules! impl_atomic {
+    ($ty:ty, $atm_ty:ident) => {
+        impl $atm_ty {
+            fn new(val: $ty) -> Self {
+                Atomic {
+                    inner: loom::sync::atomic::$atm_ty::new(val),
+                    queue: Mutex::new(Vec::new()),
+                }
+            }
+            fn wait(&self, val: $ty) {
+                if self.load(Ordering::SeqCst) != val {
+                    return;
+                }
+                self.queue.lock().unwrap().push(loom::thread::current());
+                loom::thread::park();
+            }
+            fn notify_one(&self) -> bool {
+                let Some(notify) = self.queue.lock().unwrap().pop() else {
+                    return false;
+                };
+                notify.unpark();
+                true
+            }
+            fn notify_all(&self) -> usize {
+                let mut queue = self.queue.lock().unwrap();
+                let length = queue.len();
+                while let Some(notify) = queue.pop() {
+                    notify.unpark();
+                }
+                length
+            }
+        }
+    };
+}
+
+impl_atomic!(u8, AtomicU8);
+impl_atomic!(u16, AtomicU16);
+impl_atomic!(u32, AtomicU32);
+impl_atomic!(u64, AtomicU64);
 
 impl From<MemoryOrder> for Ordering {
     fn from(ord: MemoryOrder) -> Self {
@@ -155,26 +211,26 @@ pub unsafe extern "C" fn loom_fence(ord: MemoryOrder) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn loom_atomic_init(atomic: *mut c_void, val: *const c_void, ty: SizeType) {
+pub unsafe extern "C" fn loom_atomic_init(val: *const c_void, ty: SizeType) -> *mut c_void {
     macro_rules! init {
-        ($atomic:expr, $val:expr, $ty:ty, $atomic_ty:ty) => {
-            let atomic = $atomic as *mut core::mem::MaybeUninit<$atomic_ty>;
+        ($atomic:expr, $val:expr, $ty:ty, $atomic_ty:ty) => {{
             let val = $val as *const $ty;
-            (*atomic).write(<$atomic_ty>::new(*val));
-        };
+            let atomic = Box::new(<$atomic_ty>::new(*val));
+            Box::into_raw(atomic) as *mut c_void
+        }};
     }
     match ty {
         SizeType::AtomicU8 => {
-            init!(atomic, val, u8, AtomicU8);
+            init!(atomic, val, u8, AtomicU8)
         }
         SizeType::AtomicU16 => {
-            init!(atomic, val, u16, AtomicU16);
+            init!(atomic, val, u16, AtomicU16)
         }
         SizeType::AtomicU32 => {
-            init!(atomic, val, u32, AtomicU32);
+            init!(atomic, val, u32, AtomicU32)
         }
         SizeType::AtomicU64 => {
-            init!(atomic, val, u64, AtomicU64);
+            init!(atomic, val, u64, AtomicU64)
         }
     }
 }
@@ -184,7 +240,7 @@ pub unsafe extern "C" fn loom_atomic_destroy(atomic: *mut c_void, ty: SizeType) 
     macro_rules! destroy {
         ($atomic:expr, $atomic_ty:ty) => {
             let atomic = $atomic as *mut $atomic_ty;
-            core::ptr::drop_in_place(atomic);
+            drop(Box::from_raw(atomic));
         };
     }
     match ty {
@@ -293,45 +349,68 @@ pub unsafe extern "C" fn loom_join_thread(thread: *mut c_void) -> *mut c_void {
     boxed.join().unwrap()
 }
 
-static mut FUTEX_HASHMAP: Option<DashMap<*mut c_void, Vec<Arc<Notify>>>> = None;
 #[no_mangle]
-pub unsafe extern "C" fn loom_start(func: Option<extern "C" fn()>) {
+pub unsafe extern "C" fn loom_atomic_wait(atomic: *const c_void, val: *const c_void, ty: SizeType) {
+    macro_rules! wait {
+        ($atomic:expr, $ty:ty, $atomic_ty:ty) => {{
+            let atomic = $atomic as *const $atomic_ty;
+            let expected = val as *const $ty;
+            (*atomic).wait(*expected);
+        }};
+    }
+    match ty {
+        SizeType::AtomicU8 => {
+            wait!(atomic, u8, AtomicU8);
+        }
+        SizeType::AtomicU16 => {
+            wait!(atomic, u16, AtomicU16);
+        }
+        SizeType::AtomicU32 => {
+            wait!(atomic, u32, AtomicU32);
+        }
+        SizeType::AtomicU64 => {
+            wait!(atomic, u64, AtomicU64);
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn loom_atomic_notify_one(atomic: *const c_void, ty: SizeType) -> bool {
+    macro_rules! notify_one {
+        ($atomic:expr, $atomic_ty:ty) => {{
+            let atomic = $atomic as *const $atomic_ty;
+            (*atomic).notify_one()
+        }};
+    }
+    match ty {
+        SizeType::AtomicU8 => notify_one!(atomic, AtomicU8),
+        SizeType::AtomicU16 => notify_one!(atomic, AtomicU16),
+        SizeType::AtomicU32 => notify_one!(atomic, AtomicU32),
+        SizeType::AtomicU64 => notify_one!(atomic, AtomicU64),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn loom_atomic_notify_all(atomic: *const c_void, ty: SizeType) -> usize {
+    macro_rules! notify_all {
+        ($atomic:expr, $atomic_ty:ty) => {{
+            let atomic = $atomic as *const $atomic_ty;
+            (*atomic).notify_all()
+        }};
+    }
+    match ty {
+        SizeType::AtomicU8 => notify_all!(atomic, AtomicU8),
+        SizeType::AtomicU16 => notify_all!(atomic, AtomicU16),
+        SizeType::AtomicU32 => notify_all!(atomic, AtomicU32),
+        SizeType::AtomicU64 => notify_all!(atomic, AtomicU64),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn loom_start(func: Option<unsafe extern "C" fn()>) {
     if let Some(func) = func {
         loom::model(move || unsafe {
-            FUTEX_HASHMAP = Some(DashMap::new());
             func();
-            FUTEX_HASHMAP = None;
         });
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn loom_wait(futex: *mut c_void, val: c_uint) -> bool {
-    let atomic = futex as *mut AtomicU32;
-    let futex_val = (*atomic).load(Ordering::AcqRel);
-    if futex_val != val {
-        return false;
-    }
-    let mut waiters = FUTEX_HASHMAP
-        .as_ref()
-        .unwrap()
-        .entry(futex)
-        .or_insert_with(Vec::new);
-    let wait = Arc::new(Notify::new());
-    waiters.push(wait.clone());
-    wait.wait();
-    return true;
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn loom_wake(futex: *mut c_void, limit: c_uint) -> c_uint {
-    let mut hashmap = FUTEX_HASHMAP.as_ref().unwrap().lock().unwrap();
-    let Some(waiters) = hashmap.get_mut(&futex) else {
-        return 0;
-    };
-    let to_wake = limit.min(waiters.len() as c_uint);
-    for _ in 0..to_wake {
-        waiters.pop().unwrap().notify();
-    }
-    return to_wake;
 }

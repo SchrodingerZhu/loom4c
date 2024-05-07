@@ -1,6 +1,6 @@
 #include "../include/loom4c/atomic.h"
 #include <cstdint>
-#include <stdlib.h>
+#include <cstdlib>
 using namespace loom;
 class Lock {
 private:
@@ -20,7 +20,6 @@ public:
       return;
     while (lock_.swap(LOCKED_WITH_WAITER, loom_memory_order::Acquire) !=
            UNLOCKED) {
-      loom_wait(&lock_, LOCKED_WITH_WAITER);
       loom_yield_now();
     }
 
@@ -28,15 +27,14 @@ public:
   }
 
   void unlock() {
-    if (true ||
-        lock_.swap(UNLOCKED, loom_memory_order::Release) == LOCKED_WITH_WAITER)
-      loom_wake(&lock_, 1);
+    if (lock_.swap(UNLOCKED, loom_memory_order::Release) == LOCKED_WITH_WAITER)
+      lock_.notify_one();
   }
 };
 
 int main() {
-  constexpr size_t thd_num = 1;
-  constexpr size_t loop = 2;
+  constexpr size_t thd_num = 4;
+  constexpr size_t loop = 4;
   loom_start([]() {
     struct Data {
       Lock lock;

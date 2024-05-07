@@ -68,6 +68,7 @@ bool loom_atomic_compare_and_exchange(atm_t, void *__restrict, void *__restrict,
 void loom_atomic_wait(atm_t, void *__restrict, enum loom_size_type);
 bool loom_atomic_notify_one(atm_t, enum loom_size_type);
 size_t loom_atomic_notify_all(atm_t, enum loom_size_type);
+void loom_spin_loop_hint(void);
 
 #ifdef __cplusplus
 }

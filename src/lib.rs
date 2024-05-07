@@ -3,7 +3,7 @@ use loom::{
     sync::{atomic::Ordering, Mutex},
     thread::Thread,
 };
-use std::ops::Deref;
+use std::{collections::VecDeque, ops::Deref};
 
 #[repr(C)]
 pub enum SizeType {
@@ -24,7 +24,7 @@ pub enum MemoryOrder {
 
 struct Atomic<T> {
     inner: T,
-    queue: Mutex<Vec<Thread>>,
+    queue: Mutex<VecDeque<Thread>>,
 }
 
 impl<T> Deref for Atomic<T> {
@@ -45,7 +45,7 @@ macro_rules! impl_atomic {
             fn new(val: $ty) -> Self {
                 Atomic {
                     inner: loom::sync::atomic::$atm_ty::new(val),
-                    queue: Mutex::new(Vec::new()),
+                    queue: Mutex::new(VecDeque::new()),
                 }
             }
             fn wait(&self, val: $ty) {
@@ -53,12 +53,12 @@ macro_rules! impl_atomic {
                 if self.load(Ordering::SeqCst) != val {
                     return;
                 }
-                queue.push(loom::thread::current());
+                queue.push_back(loom::thread::current());
                 drop(queue);
                 loom::thread::park();
             }
             fn notify_one(&self) -> bool {
-                let Some(notify) = self.queue.lock().unwrap().pop() else {
+                let Some(notify) = self.queue.lock().unwrap().pop_front() else {
                     return false;
                 };
                 notify.unpark();
@@ -67,7 +67,7 @@ macro_rules! impl_atomic {
             fn notify_all(&self) -> usize {
                 let mut queue = self.queue.lock().unwrap();
                 let length = queue.len();
-                while let Some(notify) = queue.pop() {
+                while let Some(notify) = queue.pop_front() {
                     notify.unpark();
                 }
                 length
@@ -415,4 +415,9 @@ pub unsafe extern "C" fn loom_start(func: Option<unsafe extern "C" fn()>) {
             func();
         });
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn loom_spin_loop_hint() {
+    loom::sync::atomic::spin_loop_hint();
 }

@@ -49,10 +49,12 @@ macro_rules! impl_atomic {
                 }
             }
             fn wait(&self, val: $ty) {
+                let mut queue = self.queue.lock().unwrap();
                 if self.load(Ordering::SeqCst) != val {
                     return;
                 }
-                self.queue.lock().unwrap().push(loom::thread::current());
+                queue.push(loom::thread::current());
+                drop(queue);
                 loom::thread::park();
             }
             fn notify_one(&self) -> bool {
